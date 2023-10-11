@@ -425,3 +425,313 @@ test "switch on tagged union" {
 const Tagged1 = union(enum) { a: u8, b: f32, c: bool };
 //void member types can have their type omitted from the syntax. Here, none is of type void.
 const Tagged2 = union(enum) { a: u8, b: f32, c: bool, none };
+
+//LABELLED BLOCKS
+//Blocks in Zig are expressions and can be given labels, which are used to yield values. Here, we are using a label called blk. Blocks yield values, meaning they can be used in place of a value. The value of an empty block {} is a value of the type void.
+test "labelled blocks" {
+    const count = blk: {
+        var sum: u32 = 0;
+        var i: u32 = 0;
+        while (i < 10) : (i += 1) sum += i;
+        break :blk sum;
+    };
+    try expect(count == 45);
+    try expect(@TypeOf(count) == u32);
+}
+
+//LABELLED LOOPS
+//Loops can be given labels, allowing you to break and continue to outer loops.
+test "nested continue" {
+    var count: usize = 0;
+    outer: for ([_]i32{ 1, 2, 3, 4, 5, 6, 7, 8 }) |_| {
+        for ([_]i32{ 1, 2, 3, 4, 5 }) |_| {
+            count += 1;
+            continue :outer;
+        }
+    }
+    try expect(count == 8);
+}
+
+//LOOPS AS EXPRESSIONS
+//Like return, break accepts a value. This can be used to yield a value from a loop. Loops in Zig also have an else branch, which is evaluated when the loop is not exited with a break.
+fn rangeHasNumber(begin: usize, end: usize, number: usize) bool {
+    var i = begin;
+    return while (i < end) : (i += 1) {
+        if (i == number) {
+            break true;
+        }
+    } else false;
+}
+
+test "while loop expression" {
+    try expect(rangeHasNumber(0, 10, 3));
+}
+
+//OPTIONALS
+//Optionals use the syntax ?T and are used to store the data null, or a value of type T.
+test "optional" {
+    var found_index: ?usize = null;
+    const data = [_]i32{ 1, 2, 3, 4, 5, 6, 7, 8, 12 };
+    for (data, 0..) |v, i| {
+        if (v == 10) found_index = i;
+    }
+    try expect(found_index == null);
+}
+
+//.? is a shorthand for orelse unreachable. This is used for when you know it is impossible for an optional value to be null, and using this to unwrap a null value is detectable illegal behaviour.
+test "orelse unreachable" {
+    const a: ?f32 = 5;
+    const b = a orelse unreachable;
+    const c = a.?;
+    try expect(b == c);
+    try expect(@TypeOf(c) == f32);
+}
+
+//COMPTIME
+//Blocks of code may be forcibly executed at compile time using the comptime keyword. In this example, the variables x and y are equivalent.
+test "comptime blocks" {
+    var x = comptime fibonacci(10);
+    _ = x;
+
+    var y = comptime blk: {
+        break :blk fibonacci(10);
+    };
+    _ = y;
+}
+
+//Integer literals are of the type comptime_int. These are special in that they have no size (they cannot be used at runtime!), and they have arbitrary precision. comptime_int values coerce to any integer type that can hold them. They also coerce to floats. Character literals are of this type.
+test "comptime_int" {
+    const a = 12;
+    const b = a + 10;
+
+    const c: u4 = a;
+    _ = c;
+    const d: f32 = b;
+    _ = d;
+}
+
+//Types in Zig are values of the type type. These are available at compile time. We have previously encountered them by checking @TypeOf and comparing with other types, but we can do more.
+test "branching on types" {
+    const a = 5;
+    const b: if (a < 10) f32 else i32 = 5;
+    _ = b;
+}
+
+//Function parameters in Zig can be tagged as being comptime. This means that the value passed to that function parameter must be known at compile time. Let’s make a function that returns a type. Notice how this function is PascalCase, as it returns a type.
+fn Matrix(
+    comptime T: type,
+    comptime width: comptime_int,
+    comptime height: comptime_int,
+) type {
+    return [height][width]T;
+}
+
+test "returning a type" {
+    try expect(Matrix(f32, 4, 4) == [4][4]f32);
+}
+
+//We can reflect upon types using the built-in @typeInfo, which takes in a type and returns a tagged union. This tagged union type can be found in std.builtin.TypeInfo (info on how to make use of imports and std later).
+fn addSmallInts(comptime T: type, a: T, b: T) T {
+    return switch (@typeInfo(T)) {
+        .ComptimeInt => a + b,
+        .Int => |info| if (info.bits <= 16)
+            a + b
+        else
+            @compileError("ints too large"),
+        else => @compileError("only ints accepted"),
+    };
+}
+
+test "typeinfo switch" {
+    const x = addSmallInts(u16, 20, 30);
+    try expect(@TypeOf(x) == u16);
+    try expect(x == 50);
+}
+
+//We can use the @Type function to create a type from a @typeInfo. @Type is implemented for most types but is notably unimplemented for enums, unions, functions, and structs.
+//Here anonymous struct syntax is used with .{}, because the T in T{} can be inferred. Anonymous structs will be covered in detail later. In this example we will get a compile error if the Int tag isn’t set.
+fn GetBiggerInt(comptime T: type) type {
+    return @Type(.{
+        .Int = .{
+            .bits = @typeInfo(T).Int.bits + 1,
+            .signedness = @typeInfo(T).Int.signedness,
+        },
+    });
+}
+
+test "@Type" {
+    try expect(GetBiggerInt(u8) == u9);
+    try expect(GetBiggerInt(i31) == i32);
+}
+
+//Returning a struct type is how you make generic data structures in Zig. The usage of @This is required here, which gets the type of the innermost struct, union, or enum. Here std.mem.eql is also used which compares two slices.
+fn Vec(
+    comptime count: comptime_int,
+    comptime T: type,
+) type {
+    return struct {
+        data: [count]T,
+        const Self = @This();
+
+        fn abs(self: Self) Self {
+            var tmp = Self{ .data = undefined };
+            for (self.data, 0..) |elem, i| {
+                tmp.data[i] = if (elem < 0)
+                    -elem
+                else
+                    elem;
+            }
+            return tmp;
+        }
+
+        fn init(data: [count]T) Self {
+            return Self{ .data = data };
+        }
+    };
+}
+
+const eql = @import("std").mem.eql;
+test "generic vector" {
+    const x = Vec(3, f32).init([_]f32{ 10, -10, 5 });
+    const y = x.abs();
+    try expect(eql(f32, &y.data, &[_]f32{ 10, 10, 5 }));
+}
+
+//The types of function parameters can also be inferred by using anytype in place of a type. @TypeOf can then be used on the parameter.
+fn plusOne(x: anytype) @TypeOf(x) {
+    return x + 1;
+}
+
+test "inferred function parameter" {
+    try expect(plusOne(@as(u32, 1)) == 2);
+}
+
+//Comptime also introduces the operators ++ and ** for concatenating and repeating arrays and slices. These operators do not work at runtime.
+test "++" {
+    const x: [4]u8 = undefined;
+    const y = x[0..];
+
+    const a: [6]u8 = undefined;
+    const b = a[0..];
+
+    const new = y ++ b;
+    try expect(new.len == 10);
+}
+
+test "**" {
+    const pattern = [_]u8{ 0xCC, 0xAA };
+    const memory = pattern ** 3;
+    try expect(eql(u8, &memory, &[_]u8{ 0xCC, 0xAA, 0xCC, 0xAA, 0xCC, 0xAA }));
+}
+
+//PAYLOAD CAPTURES
+//Payload captures use the syntax |value| and appear in many places, some of which we’ve seen already. Wherever they appear, they are used to “capture” the value from something.
+//With if statements and optionals.
+test "optional-if" {
+    var maybe_num: ?usize = 10;
+    if (maybe_num) |n| {
+        try expect(@TypeOf(n) == usize);
+        try expect(n == 10);
+    } else {
+        unreachable;
+    }
+}
+
+//With if statements and error unions. The else with the error capture is required here.
+test "error union if" {
+    var ent_num: error{UnknownEntity}!u32 = 5;
+    if (ent_num) |entity| {
+        try expect(@TypeOf(entity) == u32);
+        try expect(entity == 5);
+    } else |err| {
+        _ = err catch {};
+        unreachable;
+    }
+}
+
+//With while loops and optionals. This may have an else block.
+test "while optional" {
+    var i: ?u32 = 10;
+    while (i) |num| : (i.? -= 1) {
+        try expect(@TypeOf(num) == u32);
+        if (num == 1) {
+            i = null;
+            break;
+        }
+    }
+    try expect(i == null);
+}
+
+//INLINE LOOPS
+//inline loops are unrolled, and allow some things to happen that only work at compile time. Here we use a for, but a while works similarly.
+test "inline for" {
+    const types = [_]type{ i32, f32, u8, bool };
+    var sum: usize = 0;
+    inline for (types) |T| sum += @sizeOf(T);
+    try expect(sum == 10);
+}
+
+//OPAQUE
+//opaque types in Zig have an unknown (albeit non-zero) size and alignment. Because of this these data types cannot be stored directly. These are used to maintain type safety with pointers to types that we don’t have information about.
+//Opaque types may have declarations in their definitions (the same as structs, enums and unions).
+// extern fn show_window(*Window) callconv(.C) void;
+// const Window = opaque {
+//     fn show(self: *Window) void {
+//         show_window(self);
+//     }
+// };
+
+// test "opaque with declarations" {
+//     var main_window: *Window = undefined;
+//     main_window.show();
+// }
+
+//ANONYMOUS STRUCTS
+//The struct type may be omitted from a struct literal. These literals may coerce to other struct types.
+test "anonymous struct literal" {
+    const Point = struct { x: i32, y: i32 };
+
+    var pt: Point = .{
+        .x = 13,
+        .y = 67,
+    };
+    try expect(pt.x == 13);
+    try expect(pt.y == 67);
+}
+
+//Anonymous structs may be completely anonymous i.e. without being coerced to another struct type.
+test "fully anonymous struct" {
+    try dump(.{
+        .int = @as(u32, 1234),
+        .float = @as(f64, 12.34),
+        .b = true,
+        .s = "hi",
+    });
+}
+
+fn dump(args: anytype) !void {
+    try expect(args.int == 1234);
+    try expect(args.float == 12.34);
+    try expect(args.b);
+    try expect(args.s[0] == 'h');
+    try expect(args.s[1] == 'i');
+}
+
+//Anonymous structs without field names may be created and are referred to as tuples. These have many of the properties that arrays do; tuples can be iterated over, indexed, can be used with the ++ and ** operators, and have a len field. Internally, these have numbered field names starting at "0", which may be accessed with the special syntax @"0" which acts as an escape for the syntax - things inside @"" are always recognised as identifiers.
+//An inline loop must be used to iterate over the tuple here, as the type of each tuple field may differ.
+test "tuple" {
+    const values = .{
+        @as(u32, 1234),
+        @as(f64, 12.34),
+        true,
+        "hi",
+    } ++ .{false} ** 2;
+    try expect(values[0] == 1234);
+    try expect(values[4] == false);
+    inline for (values, 0..) |v, i| {
+        if (i != 2) continue;
+        try expect(v);
+    }
+    try expect(values.len == 6);
+    try expect(values.@"3"[0] == 'h');
+}
